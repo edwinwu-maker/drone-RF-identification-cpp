@@ -16,6 +16,119 @@ Raw file: `raw/Yan 等 - 2025 - Radio-Frequency-Based Unmanned-Aerial-Vehicle Id
 
 分帧后计算 short-time energy-to-spectral-entropy ratio (ST-ESER)，用于选择有效 signal subsequences。对选中帧做 cyclic-spectrum analysis，构造 normalized spectral correlation magnitude surface (NSCMS)，再取 top view 得到 CPP。CPP 被转换为 `224 x 224 x 3` tensor，输入 ResNet-18。
 
+### IQ/RF Signal Processing Flow
+
+论文没有把 I/Q 拆成两个独立通道处理，而是把接收信号表示为离散 RF sequence：
+
+$$
+r(n),\quad n=0,1,\ldots,M-1
+$$
+
+如果底层 dataset 以 complex IQ 存储，则这里的 $r(n)$ 和后续 $x(n)$ 可理解为复基带 IQ samples。处理流程不是直接把整段 waveform 输入网络，而是先进行检测、分段和筛选。
+
+首先使用长度为 $N$、步长为 $L$ 的 sliding window 分帧：
+
+$$
+\zeta_i(n)=r(n+(i-1)L),\quad n=0,1,\ldots,N-1
+$$
+
+相邻帧的 overlap samples 为 $N-L$，帧数为：
+
+$$
+I=\left\lfloor\frac{M-N+L}{L}\right\rfloor
+$$
+
+然后对每一帧做 DFT：
+
+$$
+U_i(m)=
+\sum_{n=0}^{N-1}
+\zeta_i(n)e^{-j2\pi nm/N}
+$$
+
+基于谱能量构造 spectral probability sequence：
+
+$$
+p_i(m)=
+\frac{|U_i(m)|^2}
+{\sum_{m=0}^{N-1}|U_i(m)|^2}
+$$
+
+并计算 spectral entropy：
+
+$$
+H_i=
+-\sum_{m=0}^{N-1}
+p_i(m)\ln p_i(m)
+$$
+
+论文定义 ST-ESER 为：
+
+$$
+\rho_i=
+\frac{\sum_{m=0}^{N-1}|U_i(m)|^2}{H_i}
+$$
+
+其直觉是：UAV signal 出现时，frame energy 较高而 spectral entropy 较低，因此 $\rho_i$ 较大。帧选择规则为：
+
+$$
+\rho_i\ge \hbar
+$$
+
+其中阈值为：
+
+$$
+\hbar=
+\varsigma \frac{1}{I}\sum_{i=1}^{I}\rho_i
+$$
+
+论文建议 $0.5\le\varsigma\le0.9$。连续通过 ST-ESER 检测的帧会被聚合成有效信号段 $x(n)$，主要对应 image-transmission intervals (ITIs) 和 frequency-hopping intervals (FHIs)，silent intervals (SIs) 不用于特征提取。
+
+对聚合后的 $x(n)$，论文使用 FAM 估计 second-order cyclic spectrum (SCS)。time-smoothed cyclic periodogram 写为：
+
+$$
+S_x^\epsilon(n,f)_{\Delta t}
+=
+\sum_\lambda
+X_T(\lambda,f_1)X_T^*(\lambda,f_2)g^{\prime}(n-\lambda)
+$$
+
+其中：
+
+$$
+f_1=f+\epsilon/2,\quad f_2=f-\epsilon/2
+$$
+
+complex demodulate 为：
+
+$$
+X_T(n,f)=
+\sum_{\lambda=-N^{\prime}/2}^{N^{\prime}/2-1}
+\hat{w}(\lambda)x(n-\lambda)
+e^{-j2\pi f(n-\lambda)T_s}
+$$
+
+最后把 SCS 幅度归一化为 NSCMS：
+
+$$
+\left|S_x^\epsilon(f)\right|
+=
+\frac{|S_x^\epsilon(f)|}
+{\max_{\epsilon,f}|S_x^\epsilon(f)|}
+$$
+
+NSCMS 的 top view 在 $\epsilon-f$ plane 上形成四个对称区域，即 CPP。论文再将 NSCMS 量化成矩阵：
+
+$$
+\gamma_{u,v}
+=
+\left\lfloor
+(2^b-1)\left|S_x^{\epsilon_u}(f_v)\right|
+\right\rfloor
+$$
+
+其中 $b=16$。该矩阵随后 reshape 为 square matrix，并通过 MATLAB `parula` colormap 转换为 pseudo-color RGB image，最终形成 ResNet-18 的输入 tensor。
+
 ## Data & Experiments
 
 实验使用公开 DroneRFa dataset，包含 `24` 类 drone-controller RF communication signals 和 `1` 类 no-drone background signal，覆盖常见商业/民用小中型 UAV。论文把原始 UAV RF signals 视为 clean signals，并加入 AWGN 控制 SNR，范围为 `-10 dB` 到 `15 dB`。
